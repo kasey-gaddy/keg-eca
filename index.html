@@ -62,22 +62,31 @@
   // Fetch + transform app.jsx manually instead of relying on Babel's
   // automatic <script src> handling, which is flaky over file:// and
   // sensitive to unpkg's unpinned @babel/standalone build.
-  fetch("app.jsx")
-    .then((res) => {
-      if (!res.ok) throw new Error(`Failed to load app.jsx: ${res.status}`);
-      return res.text();
-    })
-    .then((code) => {
-      const transformed = Babel.transform(code, { presets: ["react"] }).code;
-      const script = document.createElement("script");
-      script.text = transformed;
-      document.body.appendChild(script);
-    })
-    .catch((err) => {
-      document.getElementById("root").innerHTML =
-        `<pre style="padding:20px;color:#c0392b;">Failed to load app: ${err.message}</pre>`;
-      console.error(err);
-    });
+  //
+  // Guarded against double-injection (some preview/automation tools can
+  // trigger this block more than once per page), and wrapped in an IIFE
+  // so top-level const/let in app.jsx never leaks into global scope,
+  // which previously caused "Identifier 'XLSX' has already been declared"
+  // if it ran twice.
+  if (!window.__ECA_APP_LOADED__) {
+    window.__ECA_APP_LOADED__ = true;
+    fetch("app.jsx")
+      .then((res) => {
+        if (!res.ok) throw new Error(`Failed to load app.jsx: ${res.status}`);
+        return res.text();
+      })
+      .then((code) => {
+        const transformed = Babel.transform(code, { presets: ["react"] }).code;
+        const script = document.createElement("script");
+        script.text = `(function(){\n${transformed}\n})();`;
+        document.body.appendChild(script);
+      })
+      .catch((err) => {
+        document.getElementById("root").innerHTML =
+          `<pre style="padding:20px;color:#c0392b;">Failed to load app: ${err.message}</pre>`;
+        console.error(err);
+      });
+  }
 </script>
 </body>
 </html>
