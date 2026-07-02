@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>KE&G Employee Choice Awards</title>
+<link rel="icon" href="data:,">
+</head>
+<body>
+<div id="root"></div>
+
+<!-- React + Babel standalone (no build step, matches KE&G's existing single-file pattern) -->
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- SheetJS (xlsx) for the Excel import feature -->
+<script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+
+<script>
+  // ─── Storage shim ─────────────────────────────────────────────────
+  // Replaces Claude's artifact-only window.storage API with calls to
+  // our own Netlify Function backed by Netlify Blobs. Same method
+  // signatures (get/set/delete/list), so app.jsx needs no changes.
+  const FN = "/.netlify/functions/storage";
+
+  async function callFn(params, options) {
+    const qs = new URLSearchParams(params).toString();
+    const res = await fetch(`${FN}?${qs}`, options);
+    if (!res.ok) throw new Error(`Storage request failed: ${res.status}`);
+    return res.json();
+  }
+
+  window.storage = {
+    async get(key) {
+      const data = await callFn({ op: "get", key });
+      if (data.value === null || data.value === undefined) {
+        throw new Error("not found");
+      }
+      return { key, value: data.value, shared: true };
+    },
+    async set(key, value) {
+      const data = await callFn({ op: "set", key }, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value }),
+      });
+      return data.ok ? { key, value, shared: true } : null;
+    },
+    async delete(key) {
+      const data = await callFn({ op: "delete", key }, { method: "POST" });
+      return data.ok ? { key, deleted: true, shared: true } : null;
+    },
+    async list(prefix) {
+      const data = await callFn({ op: "list", prefix: prefix || "" });
+      return { keys: data.keys || [], prefix, shared: true };
+    },
+  };
+</script>
+
+<script type="text/babel" data-presets="react" src="app.jsx"></script>
+</body>
+</html>
