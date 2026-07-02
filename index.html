@@ -12,7 +12,7 @@
 <!-- React + Babel standalone (no build step, matches KE&G's existing single-file pattern) -->
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
 
 <!-- SheetJS (xlsx) for the Excel import feature -->
 <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
@@ -58,6 +58,26 @@
   };
 </script>
 
-<script type="text/babel" data-presets="react" src="app.jsx"></script>
+<script>
+  // Fetch + transform app.jsx manually instead of relying on Babel's
+  // automatic <script src> handling, which is flaky over file:// and
+  // sensitive to unpkg's unpinned @babel/standalone build.
+  fetch("app.jsx")
+    .then((res) => {
+      if (!res.ok) throw new Error(`Failed to load app.jsx: ${res.status}`);
+      return res.text();
+    })
+    .then((code) => {
+      const transformed = Babel.transform(code, { presets: ["react"] }).code;
+      const script = document.createElement("script");
+      script.text = transformed;
+      document.body.appendChild(script);
+    })
+    .catch((err) => {
+      document.getElementById("root").innerHTML =
+        `<pre style="padding:20px;color:#c0392b;">Failed to load app: ${err.message}</pre>`;
+      console.error(err);
+    });
+</script>
 </body>
 </html>
