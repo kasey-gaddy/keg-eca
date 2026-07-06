@@ -1,5 +1,13 @@
 const { getStore } = require("@netlify/blobs");
 
+function getEcaStore() {
+  return getStore({
+    name: "eca-data",
+    siteID: process.env.SITE_ID,
+    token: process.env.BLOBS_TOKEN,
+  });
+}
+
 function json(obj, statusCode = 200) {
   return {
     statusCode,
@@ -9,7 +17,10 @@ function json(obj, statusCode = 200) {
 }
 
 exports.handler = async (event) => {
-  const store = getStore("eca-data");
+  if (!process.env.SITE_ID || !process.env.BLOBS_TOKEN) {
+    return json({ error: "Missing SITE_ID or BLOBS_TOKEN environment variable in Netlify site settings." }, 500);
+  }
+  const store = getEcaStore();
   const params = event.queryStringParameters || {};
   const { op, key } = params;
   const prefix = params.prefix ?? "";
