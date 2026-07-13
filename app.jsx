@@ -793,6 +793,18 @@ const fuzzyMatch = (query, text) => {
   return { match: qi === q.length, score: -1 };
 };
 
+function downloadJSON(filename, obj) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function downloadCSV(filename, rows) {
   const csv = rows
     .map((row) =>
@@ -1504,7 +1516,7 @@ function AdminImport({ roster, setRoster, categories, setCategories, votes, onVo
       <div className="eca-card" style={{ marginBottom: 18, borderColor: COLORS.red }}>
         <div className="eca-section-title" style={{ color: COLORS.red }}>Start Fresh</div>
         <div className="eca-help" style={{ marginBottom: 12 }}>
-          Clears the current employee roster, all categories and nominees, and all submitted votes — everything in the app right now. Use this before importing a clean file for a new event. This can't be undone.
+          Clears the current employee roster, all categories and nominees, and all submitted votes — everything in the app right now. Use this before importing a clean file for a new event. This can't be undone — grab a backup first from Settings → Backup &amp; Restore if there's anything here worth keeping.
         </div>
         {wipeMsg && <div className="eca-success">{wipeMsg}</div>}
         {!confirmWipe ? (
@@ -1810,7 +1822,7 @@ function EmployeeModal({ initial, onSave, onClose }) {
   );
 }
 
-function AdminCategories({ categories, setCategories, roster }) {
+function AdminCategories({ categories, setCategories, roster, votes, refreshVotes }) {
   const [expanded, setExpanded] = useState(null);
   const [newCatName, setNewCatName] = useState("");
   const [bulkNomineeText, setBulkNomineeText] = useState({});
@@ -1818,6 +1830,11 @@ function AdminCategories({ categories, setCategories, roster }) {
   const [officeConfirm, setOfficeConfirm] = useState(null); // { catId, office } | null
   const [positionConfirm, setPositionConfirm] = useState(null); // { catId, position } | null
   const [positionPick, setPositionPick] = useState({});
+  const [editingNominee, setEditingNominee] = useState(null); // { catId, nominee } | null
+  const [movingNominee, setMovingNominee] = useState(null); // { catId, nominee } | null
+  const [movePick, setMovePick] = useState("");
+  const [moving, setMoving] = useState(false);
+  const [moveResult, setMoveResult] = useState(null); // { moved, conflicts, destName } | null
 
   const persist = (next) => {
     setCategories(next);
@@ -1888,6 +1905,60 @@ function AdminCategories({ categories, setCategories, roster }) {
     persist(categories.map((c) => (c.id === catId ? { ...c, nominees: c.nominees.filter((n) => n.id !== nomineeId) } : c)));
   };
 
+  // Edits a nominee's details in place. Same id, same category, so any
+  // existing votes for this person are completely unaffected.
+  const updateNominee = (catId, nomineeId, patch) => {
+    persist(categories.map((c) =>
+      c.id === catId
+        ? { ...c, nominees: c.nominees.map((n) => (n.id === nomineeId ? { ...n, ...patch } : n)) }
+        : c
+    ));
+    setEditingNominee(null);
+  };
+
+  // Moves a nominee from one category to another, keeping their same id,
+  // and rewrites every existing vote record that pointed at
+  // (fromCatId, nomineeId) to instead point at (toCatId, nomineeId) —
+  // so their vote tally carries over instead of resetting to zero.
+  // If a voter already has a separate pick in the destination category,
+  // that voter's old vote for this person can't be carried over (it
+  // would overwrite a real choice), so it's counted as a conflict and
+  // left alone rather than silently dropped or overwritten.
+  const moveNominee = async (fromCatId, toCatId, nominee) => {
+    setMoving(true);
+    const freshVotes = await loadAllVotes();
+    let movedCount = 0;
+    let conflictCount = 0;
+
+    for (const v of freshVotes) {
+      const sel = v.selections || {};
+      if (sel[fromCatId] !== nominee.id) continue;
+      if (sel[toCatId] !== undefined) {
+        conflictCount++;
+        continue;
+      }
+      const nextSelections = { ...sel };
+      delete nextSelections[fromCatId];
+      nextSelections[toCatId] = nominee.id;
+      const updatedRecord = { ...v, selections: nextSelections, lastUpdated: new Date().toISOString() };
+      await submitVoteRecord(v.employeeNumber, updatedRecord);
+      movedCount++;
+    }
+
+    const destCat = categories.find((c) => c.id === toCatId);
+    persist(categories.map((c) => {
+      if (c.id === fromCatId) return { ...c, nominees: c.nominees.filter((n) => n.id !== nominee.id) };
+      if (c.id === toCatId) return { ...c, nominees: [...c.nominees, nominee] };
+      return c;
+    }));
+
+    setMoving(false);
+    setMovingNominee(null);
+    setMovePick("");
+    setMoveResult({ moved: movedCount, conflicts: conflictCount, destName: destCat?.name || "" });
+    await refreshVotes();
+  };
+
   const distinctPositions = Array.from(new Set(roster.map((e) => e.position).filter(Boolean))).sort((a, b) => a.localeCompare(b));
 
   return (
@@ -1947,7 +2018,11 @@ function AdminCategories({ categories, setCategories, roster }) {
                           <td>{n.firstName}</td>
                           <td>{n.office && <span className="eca-tag">{n.office}</span>}</td>
                           <td style={{ fontSize: 12, color: COLORS.gray600 }}>{n.position}</td>
-                          <td><button className="eca-mini-btn" onClick={() => removeNominee(cat.id, n.id)}>Remove</button></td>
+                          <td style={{ whiteSpace: "nowrap" }}>
+                            <button className="eca-mini-btn" onClick={() => setEditingNominee({ catId: cat.id, nominee: n })}>Edit</button>
+                            <button className="eca-mini-btn" onClick={() => { setMovingNominee({ catId: cat.id, nominee: n }); setMovePick(""); }}>Move</button>
+                            <button className="eca-mini-btn" onClick={() => removeNominee(cat.id, n.id)}>Remove</button>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -2066,6 +2141,88 @@ function AdminCategories({ categories, setCategories, roster }) {
           </div>
         );
       })}
+
+      {editingNominee && (
+        <EditNomineeModal
+          initial={editingNominee.nominee}
+          onSave={(patch) => updateNominee(editingNominee.catId, editingNominee.nominee.id, patch)}
+          onClose={() => setEditingNominee(null)}
+        />
+      )}
+
+      {movingNominee && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(13,31,60,0.5)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div style={{ background: "white", borderRadius: 12, width: "100%", maxWidth: 440, padding: 24 }}>
+            <div className="eca-title" style={{ fontSize: 18, marginBottom: 6 }}>Move Nominee</div>
+            <div className="eca-help" style={{ marginBottom: 16 }}>
+              Moving <strong>{fullName(movingNominee.nominee)}</strong> out of "{categories.find((c) => c.id === movingNominee.catId)?.name}". Any votes they've already received in that category will move with them, as long as the voter hasn't also voted for someone else in the destination category.
+            </div>
+            <div className="eca-field">
+              <label className="eca-label">Move to Category</label>
+              <select className="eca-input" value={movePick} onChange={(e) => setMovePick(e.target.value)}>
+                <option value="">— Select category —</option>
+                {categories.filter((c) => c.id !== movingNominee.catId).map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 6 }}>
+              <button className="eca-btn eca-btn-secondary" onClick={() => { setMovingNominee(null); setMovePick(""); }}>Cancel</button>
+              <button
+                className="eca-btn eca-btn-primary"
+                disabled={!movePick || moving}
+                onClick={() => moveNominee(movingNominee.catId, movePick, movingNominee.nominee)}
+              >
+                {moving ? "Moving…" : "Move & Carry Over Votes"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {moveResult && (
+        <div style={{ position: "fixed", bottom: 24, right: 24, zIndex: 250, maxWidth: 340 }}>
+          <div className="eca-success" style={{ marginBottom: 0, boxShadow: "0 6px 20px rgba(13,31,60,0.15)" }}>
+            Moved to {moveResult.destName}. {moveResult.moved} vote{moveResult.moved === 1 ? "" : "s"} carried over.
+            {moveResult.conflicts > 0 && ` ${moveResult.conflicts} vote${moveResult.conflicts === 1 ? "" : "s"} couldn't move because that voter already picked someone else there.`}
+            <div style={{ marginTop: 8 }}>
+              <button className="eca-btn eca-btn-secondary eca-btn-sm" onClick={() => setMoveResult(null)}>Dismiss</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EditNomineeModal({ initial, onSave, onClose }) {
+  const [firstName, setFirstName] = useState(initial.firstName || "");
+  const [lastName, setLastName] = useState(initial.lastName || "");
+  const [office, setOffice] = useState(initial.office || "");
+  const [position, setPosition] = useState(initial.position || "");
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(13,31,60,0.5)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div style={{ background: "white", borderRadius: 12, width: "100%", maxWidth: 440, padding: 24 }}>
+        <div className="eca-title" style={{ fontSize: 18, marginBottom: 16 }}>Edit Nominee</div>
+        <div className="eca-help" style={{ marginBottom: 14 }}>
+          Changing how their name displays doesn't affect their votes — same person, same tally, just corrected spelling or the name they go by.
+        </div>
+        <div className="eca-field"><label className="eca-label">First Name</label><input className="eca-input" value={firstName} onChange={(e) => setFirstName(e.target.value)} /></div>
+        <div className="eca-field"><label className="eca-label">Last Name</label><input className="eca-input" value={lastName} onChange={(e) => setLastName(e.target.value)} /></div>
+        <div className="eca-field">
+          <label className="eca-label">Office</label>
+          <select className="eca-input" value={office} onChange={(e) => setOffice(e.target.value)}>
+            <option value="">—</option>
+            {OFFICES.map((o) => <option key={o} value={o}>{o}</option>)}
+          </select>
+        </div>
+        <div className="eca-field"><label className="eca-label">Position</label><input className="eca-input" value={position} onChange={(e) => setPosition(e.target.value)} /></div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 6 }}>
+          <button className="eca-btn eca-btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="eca-btn eca-btn-primary" onClick={() => onSave({ firstName, lastName, office, position })}>Save</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2132,6 +2289,59 @@ function AdminSettings({ storedPasscode, onSetPasscode, roster, categories, setR
   const [msg, setMsg] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
   const [confirmWipe, setConfirmWipe] = useState(false);
+  const [backingUp, setBackingUp] = useState(false);
+  const [restoreError, setRestoreError] = useState("");
+  const [restorePreview, setRestorePreview] = useState(null);
+  const [restoring, setRestoring] = useState(false);
+
+  const downloadBackup = async () => {
+    setBackingUp(true);
+    const freshVotes = await loadAllVotes();
+    downloadJSON(`KEG_ECA_Backup_${new Date().toISOString().slice(0, 10)}.json`, {
+      exportedAt: new Date().toISOString(),
+      roster,
+      categories,
+      votes: freshVotes,
+    });
+    setBackingUp(false);
+  };
+
+  const handleBackupFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setRestoreError("");
+    setRestorePreview(null);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        if (!Array.isArray(parsed.roster) || !Array.isArray(parsed.categories) || !Array.isArray(parsed.votes)) {
+          setRestoreError("That file doesn't look like a KE&G ECA backup — missing roster, categories, or votes.");
+          return;
+        }
+        setRestorePreview(parsed);
+      } catch (err) {
+        setRestoreError("Couldn't read that file as JSON.");
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const runRestore = async () => {
+    if (!restorePreview) return;
+    setRestoring(true);
+    await saveRoster(restorePreview.roster);
+    await saveCategories(restorePreview.categories);
+    for (const v of restorePreview.votes) {
+      await submitVoteRecord(v.employeeNumber, v);
+    }
+    setRoster(restorePreview.roster);
+    setCategories(restorePreview.categories);
+    await onVotesReset();
+    setRestoring(false);
+    setRestorePreview(null);
+    setMsg(`Restored from backup: ${restorePreview.roster.length} employees, ${restorePreview.categories.length} categories, ${restorePreview.votes.length} votes.`);
+  };
 
   const changePasscode = async () => {
     if (newCode.length < 4) { setMsg("Passcode must be at least 4 characters."); return; }
@@ -2166,6 +2376,39 @@ function AdminSettings({ storedPasscode, onSetPasscode, roster, categories, setR
   return (
     <div>
       {msg && <div className="eca-success">{msg}</div>}
+
+      <div className="eca-card" style={{ marginBottom: 18 }}>
+        <div className="eca-section-title">Backup &amp; Restore</div>
+        <div className="eca-help" style={{ marginBottom: 12 }}>
+          Download everything — every employee, every category and nominee, every vote — as one file you control. Redeploying updated code from GitHub never touches this data (code and data are separate systems), but it's worth having your own copy, especially once real votes are coming in.
+        </div>
+        <button className="eca-btn eca-btn-primary eca-btn-sm" onClick={downloadBackup} disabled={backingUp}>
+          {backingUp ? "Preparing…" : "Download Full Backup"}
+        </button>
+
+        <div className="eca-divider" />
+
+        <div className="eca-section-title" style={{ fontSize: 14 }}>Restore From a Backup</div>
+        <div className="eca-help" style={{ marginBottom: 10 }}>
+          Loads a previously downloaded backup file back into the app. This replaces the current roster and categories, and merges votes back in — use this to undo a mistake or recover from a problem.
+        </div>
+        {restoreError && <div className="eca-error">{restoreError}</div>}
+        <input type="file" accept="application/json" onChange={handleBackupFile} style={{ fontSize: 13, marginBottom: 12 }} />
+        {restorePreview && (
+          <div>
+            <div className="eca-error">
+              This file has {restorePreview.roster.length} employees, {restorePreview.categories.length} categories, and {restorePreview.votes.length} votes
+              {restorePreview.exportedAt ? ` (backed up ${new Date(restorePreview.exportedAt).toLocaleString()})` : ""}.
+              Restoring will overwrite the current roster and categories, and write these votes back in. This can't be undone.
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="eca-btn eca-btn-danger eca-btn-sm" onClick={runRestore} disabled={restoring}>{restoring ? "Restoring…" : "Yes, restore this backup"}</button>
+              <button className="eca-btn eca-btn-secondary eca-btn-sm" onClick={() => setRestorePreview(null)}>Cancel</button>
+            </div>
+          </div>
+        )}
+      </div>
+
       <div className="eca-card" style={{ marginBottom: 18 }}>
         <div className="eca-section-title">Change Admin Passcode</div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
@@ -2269,7 +2512,7 @@ function AdminPanel({ roster, setRoster, categories, setCategories, storedPassco
         />
       )}
       {tab === "employees" && <AdminEmployees roster={roster} setRoster={setRoster} />}
-      {tab === "categories" && <AdminCategories categories={categories} setCategories={setCategories} roster={roster} />}
+      {tab === "categories" && <AdminCategories categories={categories} setCategories={setCategories} roster={roster} votes={votes} refreshVotes={refreshVotes} />}
       {tab === "export" && <AdminExport roster={roster} categories={categories} votes={votes} />}
       {tab === "settings" && (
         <AdminSettings
