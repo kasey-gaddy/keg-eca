@@ -1286,7 +1286,7 @@ function AdminOverview({ roster, categories, votes }) {
       if (choice) tally[choice] = (tally[choice] || 0) + 1;
     });
     return cat.nominees
-      .map((n) => ({ nominee: n, count: tally[n.id] || 0 }))
+      .map((n) => ({ nominee: n, count: (tally[n.id] || 0) + (n.adjustment || 0) }))
       .sort((a, b) => b.count - a.count || byLastName(a.nominee, b.nominee));
   };
 
@@ -2254,7 +2254,7 @@ function EditNomineeModal({ initial, onSave, onClose }) {
   );
 }
 
-function AdminVotes({ roster, categories, votes, refreshVotes }) {
+function AdminVotes({ roster, categories, setCategories, votes, refreshVotes }) {
   const [search, setSearch] = useState("");
   const [selectedNumber, setSelectedNumber] = useState(null);
   const [draft, setDraft] = useState({});
@@ -2273,6 +2273,8 @@ function AdminVotes({ roster, categories, votes, refreshVotes }) {
   const [addingVoteBusy, setAddingVoteBusy] = useState(false);
   const [removingVoterNumber, setRemovingVoterNumber] = useState(null);
   const [addVotePending, setAddVotePending] = useState(null); // { employee, currentChoiceName } | null
+  const [adjustmentDraft, setAdjustmentDraft] = useState("");
+  const [savingAdjustment, setSavingAdjustment] = useState(false);
 
   const votedNumbers = new Set(votes.map((v) => String(v.employeeNumber)));
 
@@ -2339,10 +2341,29 @@ function AdminVotes({ roster, categories, votes, refreshVotes }) {
   const nomCategory = categories.find((c) => c.id === nomCatId);
   const nomNominee = nomCategory?.nominees.find((n) => n.id === nomNomineeId);
 
+  useEffect(() => {
+    setAdjustmentDraft(String(nomNominee?.adjustment || 0));
+  }, [nomNomineeId, nomCatId]);
+
   // Everyone currently credited with voting for this nominee in this category.
   const votersForNominee = nomCatId && nomNomineeId
     ? votes.filter((v) => v.selections && v.selections[nomCatId] === nomNomineeId)
     : [];
+
+  const ballotCount = votersForNominee.length;
+  const saveAdjustment = () => {
+    const value = parseInt(adjustmentDraft, 10) || 0;
+    setSavingAdjustment(true);
+    const next = categories.map((c) =>
+      c.id === nomCatId
+        ? { ...c, nominees: c.nominees.map((n) => (n.id === nomNomineeId ? { ...n, adjustment: value } : n)) }
+        : c
+    );
+    setCategories(next);
+    saveCategories(next);
+    setSavingAdjustment(false);
+    setNomMsg(`Set manual adjustment for ${fullName(nomNominee)} to ${value >= 0 ? "+" : ""}${value}. Total is now ${ballotCount + value}.`);
+  };
 
   const removeVoteFor = async (voteRecord) => {
     setRemovingVoterNumber(voteRecord.employeeNumber);
@@ -2514,6 +2535,25 @@ function AdminVotes({ roster, categories, votes, refreshVotes }) {
 
         {nomCatId && nomNomineeId && (
           <>
+            <div className="eca-card" style={{ background: COLORS.offWhite, marginBottom: 18 }}>
+              <div className="eca-section-title" style={{ fontSize: 14 }}>Manual Vote Adjustment</div>
+              <div className="eca-help" style={{ marginBottom: 12 }}>
+                For correcting a count without attaching it to a specific person — e.g. paper ballots, a miscount, or a mistake you need to fix. This number is added on top of the real ballots below, everywhere totals are shown (Overview, exports). Use a negative number to subtract.
+              </div>
+              <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+                <div className="eca-field" style={{ marginBottom: 0, width: 140 }}>
+                  <label className="eca-label">Adjustment</label>
+                  <input type="number" className="eca-input" value={adjustmentDraft} onChange={(e) => setAdjustmentDraft(e.target.value)} />
+                </div>
+                <button className="eca-btn eca-btn-primary eca-btn-sm" disabled={savingAdjustment} onClick={saveAdjustment}>
+                  {savingAdjustment ? "Saving…" : "Save Adjustment"}
+                </button>
+                <div style={{ fontSize: 13, color: COLORS.gray600 }}>
+                  {ballotCount} real ballot{ballotCount === 1 ? "" : "s"} {(nomNominee.adjustment || 0) !== 0 && `${nomNominee.adjustment > 0 ? "+" : ""}${nomNominee.adjustment} adjustment`} = <strong style={{ color: COLORS.navy }}>{ballotCount + (nomNominee.adjustment || 0)} total</strong>
+                </div>
+              </div>
+            </div>
+
             <div className="eca-section-title" style={{ fontSize: 14 }}>
               Current Votes ({votersForNominee.length})
             </div>
@@ -2586,7 +2626,7 @@ function AdminVotes({ roster, categories, votes, refreshVotes }) {
 
 function AdminExport({ roster, categories, votes }) {
   const exportResults = () => {
-    const rows = [["Category", "Nominee Last Name", "Nominee First Name", "Office", "Position", "Votes Received"]];
+    const rows = [["Category", "Nominee Last Name", "Nominee First Name", "Office", "Position", "Ballots Received", "Manual Adjustment", "Total Votes"]];
     categories.forEach((cat) => {
       const tally = {};
       votes.forEach((v) => {
@@ -2595,7 +2635,9 @@ function AdminExport({ roster, categories, votes }) {
       });
       const sortedNominees = cat.nominees.slice().sort(byLastName);
       sortedNominees.forEach((n) => {
-        rows.push([cat.name, n.lastName, n.firstName, n.office || "", n.position || "", tally[n.id] || 0]);
+        const ballots = tally[n.id] || 0;
+        const adj = n.adjustment || 0;
+        rows.push([cat.name, n.lastName, n.firstName, n.office || "", n.position || "", ballots, adj, ballots + adj]);
       });
     });
     downloadCSV(`KEG_Award_Results_${new Date().toISOString().slice(0, 10)}.csv`, rows);
@@ -2871,7 +2913,7 @@ function AdminPanel({ roster, setRoster, categories, setCategories, storedPassco
       )}
       {tab === "employees" && <AdminEmployees roster={roster} setRoster={setRoster} />}
       {tab === "categories" && <AdminCategories categories={categories} setCategories={setCategories} roster={roster} votes={votes} refreshVotes={refreshVotes} />}
-      {tab === "votes" && <AdminVotes roster={roster} categories={categories} votes={votes} refreshVotes={refreshVotes} />}
+      {tab === "votes" && <AdminVotes roster={roster} categories={categories} setCategories={setCategories} votes={votes} refreshVotes={refreshVotes} />}
       {tab === "export" && <AdminExport roster={roster} categories={categories} votes={votes} />}
       {tab === "settings" && (
         <AdminSettings
