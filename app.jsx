@@ -2264,6 +2264,16 @@ function AdminVotes({ roster, categories, votes, refreshVotes }) {
   const [msg, setMsg] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
 
+  // Nominee-centric editing: pick a category + nominee, see who voted for
+  // them, remove individual votes, or assign a new vote to them.
+  const [nomCatId, setNomCatId] = useState("");
+  const [nomNomineeId, setNomNomineeId] = useState("");
+  const [nomMsg, setNomMsg] = useState("");
+  const [addVoteSearch, setAddVoteSearch] = useState("");
+  const [addingVoteBusy, setAddingVoteBusy] = useState(false);
+  const [removingVoterNumber, setRemovingVoterNumber] = useState(null);
+  const [addVotePending, setAddVotePending] = useState(null); // { employee, currentChoiceName } | null
+
   const votedNumbers = new Set(votes.map((v) => String(v.employeeNumber)));
 
   const results = search.trim()
@@ -2323,6 +2333,64 @@ function AdminVotes({ roster, categories, votes, refreshVotes }) {
     setDraft({});
     setExistingRecord(null);
     setMsg(`Cleared ${fullName(selectedEmployee)}'s ballot — they now show as not voted.`);
+    await refreshVotes();
+  };
+
+  const nomCategory = categories.find((c) => c.id === nomCatId);
+  const nomNominee = nomCategory?.nominees.find((n) => n.id === nomNomineeId);
+
+  // Everyone currently credited with voting for this nominee in this category.
+  const votersForNominee = nomCatId && nomNomineeId
+    ? votes.filter((v) => v.selections && v.selections[nomCatId] === nomNomineeId)
+    : [];
+
+  const removeVoteFor = async (voteRecord) => {
+    setRemovingVoterNumber(voteRecord.employeeNumber);
+    const fresh = await getVoteRecord(voteRecord.employeeNumber);
+    if (fresh) {
+      const nextSelections = { ...fresh.selections };
+      delete nextSelections[nomCatId];
+      await submitVoteRecord(voteRecord.employeeNumber, { ...fresh, selections: nextSelections, lastUpdated: new Date().toISOString() });
+    }
+    setRemovingVoterNumber(null);
+    setNomMsg(`Removed ${voteRecord.voterFirstName} ${voteRecord.voterLastName}'s vote for ${fullName(nomNominee)}.`);
+    await refreshVotes();
+  };
+
+  const votersForNomineeNumbers = new Set(votersForNominee.map((v) => String(v.employeeNumber)));
+  const addVoteResults = addVoteSearch.trim() && nomCatId
+    ? roster
+        .filter((e) => !votersForNomineeNumbers.has(String(e.number)))
+        .map((e) => ({ e, m: fuzzyMatch(addVoteSearch, `${fullName(e)} ${e.number}`) }))
+        .filter((x) => x.m.match)
+        .sort((a, b) => b.m.score - a.m.score || byLastName(a.e, b.e))
+        .slice(0, 8)
+    : [];
+
+  const startAddVote = async (employee) => {
+    const fresh = await getVoteRecord(employee.number);
+    const currentNomineeId = fresh?.selections?.[nomCatId];
+    const currentChoiceName = currentNomineeId ? fullName(nomCategory.nominees.find((n) => n.id === currentNomineeId)) : null;
+    setAddVotePending({ employee, currentChoiceName });
+  };
+
+  const assignVote = async (employee) => {
+    setAddingVoteBusy(true);
+    const fresh = await getVoteRecord(employee.number);
+    const record = fresh || {
+      employeeNumber: employee.number,
+      voterFirstName: employee.firstName,
+      voterLastName: employee.lastName,
+      office: employee.office || "",
+      timestamp: new Date().toISOString(),
+      selections: {},
+    };
+    const nextSelections = { ...record.selections, [nomCatId]: nomNomineeId };
+    await submitVoteRecord(employee.number, { ...record, selections: nextSelections, lastUpdated: new Date().toISOString() });
+    setAddingVoteBusy(false);
+    setAddVotePending(null);
+    setAddVoteSearch("");
+    setNomMsg(`Added ${fullName(employee)}'s vote for ${fullName(nomNominee)}.`);
     await refreshVotes();
   };
 
@@ -2405,6 +2473,113 @@ function AdminVotes({ roster, categories, votes, refreshVotes }) {
           )}
         </div>
       )}
+
+      <div className="eca-divider" />
+
+      <div className="eca-card">
+        <div className="eca-section-title">Edit Votes by Nominee</div>
+        <div className="eca-help" style={{ marginBottom: 14 }}>
+          Pick a category and a nominee to see everyone currently credited with voting for them. Remove individual votes, or add a vote on someone's behalf.
+        </div>
+
+        <div style={{ display: "flex", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
+          <div className="eca-field" style={{ marginBottom: 0, flex: "1 1 220px" }}>
+            <label className="eca-label">Category</label>
+            <select
+              className="eca-input"
+              value={nomCatId}
+              onChange={(e) => { setNomCatId(e.target.value); setNomNomineeId(""); setNomMsg(""); setAddVotePending(null); }}
+            >
+              <option value="">— Select category —</option>
+              {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+          <div className="eca-field" style={{ marginBottom: 0, flex: "1 1 220px" }}>
+            <label className="eca-label">Nominee</label>
+            <select
+              className="eca-input"
+              value={nomNomineeId}
+              onChange={(e) => { setNomNomineeId(e.target.value); setNomMsg(""); setAddVotePending(null); }}
+              disabled={!nomCatId}
+            >
+              <option value="">— Select nominee —</option>
+              {nomCategory?.nominees.slice().sort(byLastName).map((n) => (
+                <option key={n.id} value={n.id}>{fullName(n)}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {nomMsg && <div className="eca-success">{nomMsg}</div>}
+
+        {nomCatId && nomNomineeId && (
+          <>
+            <div className="eca-section-title" style={{ fontSize: 14 }}>
+              Current Votes ({votersForNominee.length})
+            </div>
+            <div className="eca-table-wrap" style={{ marginBottom: 18 }}>
+              <table className="eca-table">
+                <thead><tr><th>Voter</th><th>Employee #</th><th></th></tr></thead>
+                <tbody>
+                  {votersForNominee.length === 0 && <tr><td colSpan={3}><div className="eca-empty">No one has voted for {fullName(nomNominee)} in this category yet.</div></td></tr>}
+                  {votersForNominee.map((v) => (
+                    <tr key={v.employeeNumber}>
+                      <td className="td-name" style={{ fontWeight: 600 }}>{v.voterFirstName} {v.voterLastName}</td>
+                      <td>{v.employeeNumber}</td>
+                      <td>
+                        <button className="eca-mini-btn" disabled={removingVoterNumber === v.employeeNumber} onClick={() => removeVoteFor(v)}>
+                          {removingVoterNumber === v.employeeNumber ? "Removing…" : "Remove Vote"}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <label className="eca-label">Add a Vote for {fullName(nomNominee)}</label>
+            <div className="eca-help" style={{ marginBottom: 8 }}>
+              Search for the employee whose vote you want to assign here.
+            </div>
+            <div style={{ position: "relative", marginBottom: 14 }}>
+              <input
+                className="eca-input"
+                placeholder="Start typing a name or employee number…"
+                value={addVoteSearch}
+                onChange={(e) => { setAddVoteSearch(e.target.value); setAddVotePending(null); }}
+              />
+              {addVoteResults.length > 0 && !addVotePending && (
+                <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "white", border: `1px solid ${COLORS.gray200}`, borderRadius: 8, marginTop: 4, zIndex: 10, boxShadow: "0 6px 20px rgba(13,31,60,0.1)", maxHeight: 260, overflowY: "auto" }}>
+                  {addVoteResults.map(({ e }) => (
+                    <div
+                      key={e.number}
+                      onClick={() => startAddVote(e)}
+                      style={{ padding: "9px 14px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: `1px solid ${COLORS.gray100}` }}
+                    >
+                      <span style={{ fontSize: 13, color: COLORS.navy }}>{fullName(e)} <span style={{ color: COLORS.gray400 }}>#{e.number}</span></span>
+                      {e.office && <span className="eca-tag">{e.office}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {addVotePending && (
+              <div className={addVotePending.currentChoiceName ? "eca-error" : "eca-success"} style={{ marginBottom: 12 }}>
+                {addVotePending.currentChoiceName
+                  ? `${fullName(addVotePending.employee)} already voted for ${addVotePending.currentChoiceName} in this category. Assigning this vote will change their pick to ${fullName(nomNominee)}.`
+                  : `${fullName(addVotePending.employee)} hasn't voted in this category yet. This will add their vote for ${fullName(nomNominee)}.`}
+                <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                  <button className="eca-btn eca-btn-primary eca-btn-sm" disabled={addingVoteBusy} onClick={() => assignVote(addVotePending.employee)}>
+                    {addingVoteBusy ? "Saving…" : "Confirm"}
+                  </button>
+                  <button className="eca-btn eca-btn-secondary eca-btn-sm" onClick={() => setAddVotePending(null)}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }
