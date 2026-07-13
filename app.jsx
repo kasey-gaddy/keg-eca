@@ -1857,6 +1857,15 @@ function AdminCategories({ categories, setCategories, roster, votes, refreshVote
     persist(categories.filter((c) => c.id !== id));
   };
 
+  const moveCategory = (index, direction) => {
+    const newIndex = index + direction;
+    if (newIndex < 0 || newIndex >= categories.length) return;
+    const next = categories.slice();
+    const [moved] = next.splice(index, 1);
+    next.splice(newIndex, 0, moved);
+    persist(next);
+  };
+
   const addNomineeBulk = (catId) => {
     const text = bulkNomineeText[catId] || "";
     const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -1973,7 +1982,7 @@ function AdminCategories({ categories, setCategories, roster, votes, refreshVote
 
       {categories.length === 0 && <div className="eca-empty">No categories yet. Add your first one above.</div>}
 
-      {categories.map((cat) => {
+      {categories.map((cat, catIndex) => {
         const isOpen = expanded === cat.id;
         const query = nomineeQuery[cat.id] || "";
         const existingNumbers = new Set(cat.nominees.filter((n) => n.number).map((n) => n.number));
@@ -1987,9 +1996,27 @@ function AdminCategories({ categories, setCategories, roster, votes, refreshVote
         return (
           <div key={cat.id} className="eca-category-block">
             <div className="eca-category-head" onClick={() => setExpanded(isOpen ? null : cat.id)}>
-              <div>
-                <div className="eca-category-name">{cat.name}</div>
-                <div className="eca-category-meta">{cat.nominees.length} nominees · {cat.winnerCount} winner{cat.winnerCount === 1 ? "" : "s"}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  <button
+                    className="eca-mini-btn"
+                    style={{ padding: "0 4px", lineHeight: 1, opacity: catIndex === 0 ? 0.3 : 1 }}
+                    disabled={catIndex === 0}
+                    onClick={(e) => { e.stopPropagation(); moveCategory(catIndex, -1); }}
+                    title="Move up"
+                  >▲</button>
+                  <button
+                    className="eca-mini-btn"
+                    style={{ padding: "0 4px", lineHeight: 1, opacity: catIndex === categories.length - 1 ? 0.3 : 1 }}
+                    disabled={catIndex === categories.length - 1}
+                    onClick={(e) => { e.stopPropagation(); moveCategory(catIndex, 1); }}
+                    title="Move down"
+                  >▼</button>
+                </div>
+                <div>
+                  <div className="eca-category-name">{cat.name}</div>
+                  <div className="eca-category-meta">{cat.nominees.length} nominees · {cat.winnerCount} winner{cat.winnerCount === 1 ? "" : "s"}</div>
+                </div>
               </div>
               <button className="eca-mini-btn" onClick={(e) => { e.stopPropagation(); removeCategory(cat.id); }}>Remove Category</button>
             </div>
@@ -2223,6 +2250,161 @@ function EditNomineeModal({ initial, onSave, onClose }) {
           <button className="eca-btn eca-btn-primary" onClick={() => onSave({ firstName, lastName, office, position })}>Save</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function AdminVotes({ roster, categories, votes, refreshVotes }) {
+  const [search, setSearch] = useState("");
+  const [selectedNumber, setSelectedNumber] = useState(null);
+  const [draft, setDraft] = useState({});
+  const [loadingBallot, setLoadingBallot] = useState(false);
+  const [existingRecord, setExistingRecord] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  const votedNumbers = new Set(votes.map((v) => String(v.employeeNumber)));
+
+  const results = search.trim()
+    ? roster
+        .map((e) => ({ e, m: fuzzyMatch(search, `${fullName(e)} ${e.number}`) }))
+        .filter((x) => x.m.match)
+        .sort((a, b) => b.m.score - a.m.score || byLastName(a.e, b.e))
+        .slice(0, 10)
+    : [];
+
+  const openVoter = async (employee) => {
+    setMsg("");
+    setSelectedNumber(employee.number);
+    setLoadingBallot(true);
+    const record = await getVoteRecord(employee.number);
+    setExistingRecord(record);
+    setDraft(record?.selections ? { ...record.selections } : {});
+    setLoadingBallot(false);
+  };
+
+  const setChoice = (catId, nomineeId) => {
+    setDraft((d) => {
+      const next = { ...d };
+      if (!nomineeId) delete next[catId];
+      else next[catId] = nomineeId;
+      return next;
+    });
+  };
+
+  const selectedEmployee = roster.find((e) => e.number === selectedNumber);
+
+  const saveBallot = async () => {
+    if (!selectedEmployee) return;
+    setSaving(true);
+    const record = {
+      employeeNumber: selectedEmployee.number,
+      voterFirstName: selectedEmployee.firstName,
+      voterLastName: selectedEmployee.lastName,
+      office: selectedEmployee.office || "",
+      timestamp: existingRecord?.timestamp || new Date().toISOString(),
+      lastUpdated: new Date().toISOString(),
+      selections: draft,
+    };
+    await submitVoteRecord(selectedEmployee.number, record);
+    setSaving(false);
+    setMsg(`Saved ${fullName(selectedEmployee)}'s ballot.`);
+    await refreshVotes();
+    setExistingRecord(record);
+  };
+
+  const clearBallot = async () => {
+    if (!selectedEmployee) return;
+    setSaving(true);
+    await safeSet(VOTE_PREFIX + selectedEmployee.number, "", true);
+    setSaving(false);
+    setConfirmClear(false);
+    setDraft({});
+    setExistingRecord(null);
+    setMsg(`Cleared ${fullName(selectedEmployee)}'s ballot — they now show as not voted.`);
+    await refreshVotes();
+  };
+
+  return (
+    <div>
+      <div className="eca-card" style={{ marginBottom: 18 }}>
+        <div className="eca-section-title">Find a Voter</div>
+        <div className="eca-help" style={{ marginBottom: 10 }}>
+          Search by name or employee number to view or manually correct someone's ballot — useful for fixing a miscast vote or entering a paper ballot on someone's behalf.
+        </div>
+        <input
+          className="eca-input"
+          placeholder="Search by name or employee number…"
+          value={search}
+          onChange={(e) => { setSearch(e.target.value); setMsg(""); }}
+        />
+        {results.length > 0 && (
+          <div style={{ marginTop: 10, border: `1px solid ${COLORS.gray200}`, borderRadius: 8, maxHeight: 260, overflowY: "auto" }}>
+            {results.map(({ e }) => (
+              <div
+                key={e.number}
+                onClick={() => openVoter(e)}
+                style={{ padding: "9px 14px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: `1px solid ${COLORS.gray100}` }}
+              >
+                <span style={{ fontSize: 13, color: COLORS.navy }}>{fullName(e)} <span style={{ color: COLORS.gray400 }}>#{e.number}</span></span>
+                {votedNumbers.has(String(e.number)) ? <span className="eca-chosen-pill">Voted</span> : <span className="eca-skip-pill">Not voted</span>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {msg && <div className="eca-success">{msg}</div>}
+
+      {selectedEmployee && (
+        <div className="eca-card">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 }}>
+            <div>
+              <div className="eca-section-title" style={{ marginBottom: 2 }}>{fullName(selectedEmployee)}</div>
+              <div className="eca-help" style={{ marginBottom: 0 }}>
+                #{selectedEmployee.number} · {selectedEmployee.office || "No office"}
+                {existingRecord ? " · has a submitted ballot" : " · hasn't voted yet"}
+              </div>
+            </div>
+            {existingRecord && (
+              !confirmClear ? (
+                <button className="eca-btn eca-btn-secondary eca-btn-sm" onClick={() => setConfirmClear(true)}>Clear Their Ballot</button>
+              ) : (
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontSize: 12, color: COLORS.red, marginBottom: 6 }}>Reset to not-voted?</div>
+                  <button className="eca-btn eca-btn-danger eca-btn-sm" onClick={clearBallot} style={{ marginRight: 6 }}>Yes, clear</button>
+                  <button className="eca-btn eca-btn-secondary eca-btn-sm" onClick={() => setConfirmClear(false)}>Cancel</button>
+                </div>
+              )
+            )}
+          </div>
+
+          <div className="eca-divider" />
+
+          {loadingBallot ? (
+            <div className="eca-empty">Loading ballot…</div>
+          ) : (
+            <>
+              {categories.length === 0 && <div className="eca-empty">No categories set up yet.</div>}
+              {categories.map((cat) => (
+                <div key={cat.id} className="eca-field">
+                  <label className="eca-label">{cat.name}</label>
+                  <select className="eca-input" value={draft[cat.id] || ""} onChange={(e) => setChoice(cat.id, e.target.value)}>
+                    <option value="">— No selection —</option>
+                    {cat.nominees.slice().sort(byLastName).map((n) => (
+                      <option key={n.id} value={n.id}>{fullName(n)}{n.office ? ` — ${n.office}` : ""}</option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+              <button className="eca-btn eca-btn-primary" style={{ marginTop: 8 }} onClick={saveBallot} disabled={saving}>
+                {saving ? "Saving…" : "Save Ballot"}
+              </button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -2482,6 +2664,7 @@ function AdminPanel({ roster, setRoster, categories, setCategories, storedPassco
     { id: "import", label: "Import" },
     { id: "employees", label: "Employees" },
     { id: "categories", label: "Categories" },
+    { id: "votes", label: "Votes" },
     { id: "export", label: "Export" },
     { id: "settings", label: "Settings" },
   ];
@@ -2513,6 +2696,7 @@ function AdminPanel({ roster, setRoster, categories, setCategories, storedPassco
       )}
       {tab === "employees" && <AdminEmployees roster={roster} setRoster={setRoster} />}
       {tab === "categories" && <AdminCategories categories={categories} setCategories={setCategories} roster={roster} votes={votes} refreshVotes={refreshVotes} />}
+      {tab === "votes" && <AdminVotes roster={roster} categories={categories} votes={votes} refreshVotes={refreshVotes} />}
       {tab === "export" && <AdminExport roster={roster} categories={categories} votes={votes} />}
       {tab === "settings" && (
         <AdminSettings
