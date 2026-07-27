@@ -689,6 +689,7 @@ const OFFICIAL_ROSTER = [
 const ROSTER_KEY = "employees-roster";
 const CATEGORIES_KEY = "award-categories";
 const PASSCODE_KEY = "admin-passcode";
+const VOTING_STATUS_KEY = "voting-status";
 const VOTE_PREFIX = "votes:";
 
 async function safeGet(key, shared) {
@@ -721,6 +722,14 @@ const saveCategories = (cats) => safeSet(CATEGORIES_KEY, JSON.stringify(cats), t
 
 const loadPasscode = async () => safeGet(PASSCODE_KEY, true);
 const savePasscode = (code) => safeSet(PASSCODE_KEY, code, true);
+
+// Voting defaults to open if never explicitly set — so nothing changes
+// for events that don't use this feature.
+const loadVotingOpen = async () => {
+  const v = await safeGet(VOTING_STATUS_KEY, true);
+  return v !== "closed";
+};
+const saveVotingOpen = (isOpen) => safeSet(VOTING_STATUS_KEY, isOpen ? "open" : "closed", true);
 
 const getVoteRecord = async (employeeNumber) => {
   const v = await safeGet(VOTE_PREFIX + employeeNumber, true);
@@ -1071,6 +1080,12 @@ function VotingForm({ voter, categories, existingRecord, onSubmitted }) {
       return;
     }
     setSubmitting(true);
+    const stillOpen = await loadVotingOpen();
+    if (!stillOpen) {
+      setSubmitting(false);
+      setError("Voting closed while you were filling this out, so this couldn't be saved. Sorry — contact HR if you think this is a mistake.");
+      return;
+    }
     const mergedSelections = { ...lockedSelections, ...selections };
     const record = {
       employeeNumber: voter.number,
@@ -1205,6 +1220,20 @@ function VoterDone() {
   );
 }
 
+function VotingClosed() {
+  return (
+    <div className="eca-shell">
+      <div className="eca-card" style={{ textAlign: "center", padding: "48px 30px" }}>
+        <div style={{ fontSize: 40, marginBottom: 12 }}>🗳️</div>
+        <div className="eca-title">Voting Is Closed</div>
+        <div className="eca-subtitle" style={{ marginBottom: 0 }}>
+          Thanks to everyone who voted in this year's Employee Choice Awards. Winners will be announced at the Shareholders Dinner.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // ADMIN FLOW
 // ══════════════════════════════════════════════════════════════════════
@@ -1269,7 +1298,7 @@ function AdminLogin({ storedPasscode, onSetPasscode, onLoggedIn }) {
   );
 }
 
-function AdminOverview({ roster, categories, votes }) {
+function AdminOverview({ roster, categories, votes, votingOpen, onSetVotingOpen }) {
   const votedCount = votes.length;
   const pct = roster.length ? Math.round((votedCount / roster.length) * 100) : 0;
   const byOffice = OFFICES.map((office) => ({
@@ -1278,6 +1307,8 @@ function AdminOverview({ roster, categories, votes }) {
     voted: votes.filter((v) => v.office === office).length,
   }));
   const [expandedLeaderboard, setExpandedLeaderboard] = useState(null);
+  const [confirmToggle, setConfirmToggle] = useState(false);
+  const [togglingVotes, setTogglingVotes] = useState(false);
 
   const standingsFor = (cat) => {
     const tally = {};
@@ -1290,8 +1321,46 @@ function AdminOverview({ roster, categories, votes }) {
       .sort((a, b) => b.count - a.count || byLastName(a.nominee, b.nominee));
   };
 
+  const handleToggle = async () => {
+    setTogglingVotes(true);
+    await onSetVotingOpen(!votingOpen);
+    setTogglingVotes(false);
+    setConfirmToggle(false);
+  };
+
   return (
     <div>
+      <div className="eca-card" style={{ marginBottom: 20, borderColor: votingOpen ? COLORS.gray200 : COLORS.red }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <div className="eca-section-title" style={{ marginBottom: 4 }}>
+              Voting is currently{" "}
+              <span style={{ color: votingOpen ? COLORS.green : COLORS.red }}>{votingOpen ? "OPEN" : "CLOSED"}</span>
+            </div>
+            <div className="eca-help" style={{ marginBottom: 0 }}>
+              {votingOpen
+                ? "Employees can log in and vote right now. Close voting once the event ends to stop new ballots."
+                : "The ballot page is showing a closed message. No one can submit or change a vote — admin tools here still work normally."}
+            </div>
+          </div>
+          {!confirmToggle ? (
+            <button className={`eca-btn eca-btn-sm ${votingOpen ? "eca-btn-danger" : "eca-btn-primary"}`} onClick={() => setConfirmToggle(true)}>
+              {votingOpen ? "Close Voting" : "Reopen Voting"}
+            </button>
+          ) : (
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 12, color: COLORS.gray600, marginBottom: 6 }}>
+                {votingOpen ? "No one will be able to vote after this." : "Employees will be able to vote again after this."}
+              </div>
+              <button className={`eca-btn eca-btn-sm ${votingOpen ? "eca-btn-danger" : "eca-btn-primary"}`} onClick={handleToggle} disabled={togglingVotes} style={{ marginRight: 6 }}>
+                {togglingVotes ? "Saving…" : `Yes, ${votingOpen ? "close" : "reopen"} voting`}
+              </button>
+              <button className="eca-btn eca-btn-secondary eca-btn-sm" onClick={() => setConfirmToggle(false)}>Cancel</button>
+            </div>
+          )}
+        </div>
+      </div>
+
       <div className="eca-stats-grid">
         <div className="eca-stat">
           <div className="eca-stat-label">Eligible Employees</div>
@@ -2862,7 +2931,7 @@ function AdminSettings({ storedPasscode, onSetPasscode, roster, categories, setR
   );
 }
 
-function AdminPanel({ roster, setRoster, categories, setCategories, storedPasscode, onSetPasscode }) {
+function AdminPanel({ roster, setRoster, categories, setCategories, storedPasscode, onSetPasscode, votingOpen, onSetVotingOpen }) {
   const [tab, setTab] = useState("overview");
   const [votes, setVotes] = useState([]);
   const [votesLoading, setVotesLoading] = useState(true);
@@ -2900,7 +2969,7 @@ function AdminPanel({ roster, setRoster, categories, setCategories, storedPassco
         ))}
       </div>
 
-      {tab === "overview" && <AdminOverview roster={roster} categories={categories} votes={votes} />}
+      {tab === "overview" && <AdminOverview roster={roster} categories={categories} votes={votes} votingOpen={votingOpen} onSetVotingOpen={onSetVotingOpen} />}
       {tab === "import" && (
         <AdminImport
           roster={roster}
@@ -2940,6 +3009,7 @@ function App() {
   const [roster, setRoster] = useState([]);
   const [categories, setCategories] = useState([]);
   const [passcode, setPasscodeState] = useState(null);
+  const [votingOpen, setVotingOpenState] = useState(true);
 
   const [mode, setMode] = useState("voter"); // 'voter' | 'admin'
   const [adminAuthed, setAdminAuthed] = useState(false);
@@ -2950,10 +3020,11 @@ function App() {
 
   useEffect(() => {
     (async () => {
-      const [r, c, p] = await Promise.all([loadRoster(), loadCategories(), loadPasscode()]);
+      const [r, c, p, vOpen] = await Promise.all([loadRoster(), loadCategories(), loadPasscode(), loadVotingOpen()]);
       setRoster(r);
       setCategories(c);
       setPasscodeState(p);
+      setVotingOpenState(vOpen);
       setLoading(false);
     })();
   }, []);
@@ -2961,6 +3032,11 @@ function App() {
   const handleSetPasscode = async (code) => {
     await savePasscode(code);
     setPasscodeState(code);
+  };
+
+  const handleSetVotingOpen = async (isOpen) => {
+    await saveVotingOpen(isOpen);
+    setVotingOpenState(isOpen);
   };
 
   const switchMode = () => {
@@ -2990,13 +3066,14 @@ function App() {
       <div className="eca-root">
         <Header mode={mode} onSwitch={switchMode} />
 
-        {mode === "voter" && voterStep === "login" && (
+        {mode === "voter" && !votingOpen && <VotingClosed />}
+        {mode === "voter" && votingOpen && voterStep === "login" && (
           <VoterLogin roster={roster} onVerified={(emp, record) => { setVerifiedVoter(emp); setExistingRecord(record); setVoterStep("voting"); }} />
         )}
-        {mode === "voter" && voterStep === "voting" && verifiedVoter && (
+        {mode === "voter" && votingOpen && voterStep === "voting" && verifiedVoter && (
           <VotingForm voter={verifiedVoter} categories={categories} existingRecord={existingRecord} onSubmitted={() => setVoterStep("done")} />
         )}
-        {mode === "voter" && voterStep === "done" && <VoterDone />}
+        {mode === "voter" && votingOpen && voterStep === "done" && <VoterDone />}
 
         {mode === "admin" && !adminAuthed && (
           <AdminLogin storedPasscode={passcode} onSetPasscode={handleSetPasscode} onLoggedIn={() => setAdminAuthed(true)} />
@@ -3009,6 +3086,8 @@ function App() {
             setCategories={setCategories}
             storedPasscode={passcode}
             onSetPasscode={handleSetPasscode}
+            votingOpen={votingOpen}
+            onSetVotingOpen={handleSetVotingOpen}
           />
         )}
       </div>
